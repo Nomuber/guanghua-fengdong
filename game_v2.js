@@ -28,8 +28,20 @@ const PARAMS = {
   superDur: 3.2,        // 超级加速持续时间（秒）
   superLift: 940,       // 超级加速托力（滑翔期净余 ≈ +320/s，与狂风相当）
 
-  // —— 受伤窗口：撞墙/被砸后进入带伤状态，期间再次受伤才出局 ——
+  // —— 受伤系统：被杂物砸中进入带伤状态（红闪 2 秒），期间再被砸才出局；
+  //    每次受伤后 0.1 秒无敌（免疫碰撞）；撞墙纯物理反弹、永不致死 ——
   hurtWindow: 2.0,
+  invulTime: 0.1,
+
+  // —— 主动冲刺：双击屏幕 / W 键触发，短暂无敌 + 冷却 ——
+  dashSpeed: 2400,      // 冲刺期间的竖直速度
+  dashDur: 0.3,         // 冲刺持续时间（秒）= 无敌时间
+  dashCd: 6,            // 冲刺冷却（秒）
+
+  // —— 速度透视：极快时画面上窄下宽 + 轻微色差残影 ——
+  warpStart: 1500,      // 开始出现透视的速度
+  warpFull: 2300,       // 透视拉满的速度
+  warpStrength: 0.16,   // 透视强度（顶部最窄 -16%，底部最宽 +16%）
 
   // —— 风柱（风洞缝隙） ——
   columnGap: 240,       // 相邻风柱的垂直间距（像素）
@@ -72,7 +84,7 @@ const PARAMS = {
 
   // —— 加速反馈 ——
   columnBoost: 280,    // 首次触碰风柱的瞬时助推（核心区×核心倍率）；每 5 根触发超级加速
-  camZoomOut: 0.14,    // 高速上升时相机缩小的最大比例（视野变广=速度感）
+  camZoomOut: 0.22,    // 高速上升时相机缩小的最大比例（视野显著撑开=速度感）
   camLeadMax: 240,     // 高速时镜头向上多预留的视野（像素）
   zoomPunch: 0.06,     // 吃到风柱/狂风来临瞬间的镜头前冲量
 
@@ -94,7 +106,16 @@ const PARAMS = {
    ------------------------------------------------------------ */
 const LOGIC_W = 400, LOGIC_H = 720;
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
+let ctx = canvas.getContext('2d');
+const OC_PAD = 100; // 离屏画布左右余量（速度透视切片用）
+let oc = null, ocCtx = null;
+function ensureOC() {
+  if (oc) return;
+  oc = document.createElement('canvas');
+  oc.width = LOGIC_W + OC_PAD * 2;
+  oc.height = LOGIC_H;
+  ocCtx = oc.getContext('2d');
+}
 
 function resize() {
   const scale = Math.min(innerWidth / LOGIC_W, innerHeight / LOGIC_H);
@@ -112,6 +133,7 @@ const input = { left: false, right: false };
 addEventListener('keydown', (e) => {
   initAudio();
   if (e.key === 'm' || e.key === 'M') toggleMute();
+  if (e.key === 'w' || e.key === 'W' || e.key === 'ArrowUp') tryDash();
   if (e.key === 'ArrowLeft') input.left = true;
   if (e.key === 'ArrowRight') input.right = true;
   if (e.key === ' ' || e.key === 'Enter') advanceState();
@@ -130,6 +152,9 @@ canvas.addEventListener('touchstart', (e) => {
   initAudio();
   const pos = touchPos(e);
   if (pos.p > 0.86 && pos.q < 0.1) { toggleMute(); return; } // 右上角静音钮
+  const nowTap = performance.now();
+  if (nowTap - lastTap < 300) { lastTap = 0; tryDash(); } // 双触 = 冲刺
+  else lastTap = nowTap;
   if (state !== 'playing') { advanceState(); return; }
   if (pos.p < 0.5) input.left = true; else input.right = true;
 }, { passive: false });
@@ -143,6 +168,9 @@ canvas.addEventListener('mousedown', (e) => {
   const p = (e.clientX - rect.left) / rect.width;
   const q = (e.clientY - rect.top) / rect.height;
   if (p > 0.86 && q < 0.1) { toggleMute(); return; } // 右上角静音钮
+  const nowTap = performance.now();
+  if (nowTap - lastTap < 300) { lastTap = 0; tryDash(); } // 双击 = 冲刺
+  else lastTap = nowTap;
   if (state !== 'playing') { advanceState(); return; }
   if (p < 0.5) input.left = true; else input.right = true;
 });
@@ -230,6 +258,7 @@ function sfx(kind) {
     case 'gust':   whoosh(0.5, 200, 900, 0.1); break;
     case 'bounce': tone(170, 0.12, 'square', 0.1, 85); whoosh(0.12, 1200, 320, 0.14); break;
     case 'hit':    tone(140, 0.16, 'square', 0.11, 70); whoosh(0.15, 900, 220, 0.22); break;
+    case 'dash':  whoosh(0.35, 400, 3200, 0.28); tone(180, 0.3, 'sawtooth', 0.08, 720); break;
     case 'warn':   tone(660, 0.09, 'square', 0.06); setTimeout(() => tone(660, 0.09, 'square', 0.06), 150); break;
     case 'die':    tone(300, 0.55, 'sawtooth', 0.11, 60); whoosh(0.5, 800, 120, 0.16); break;
     case 'record': [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => tone(f, 0.2, 'triangle', 0.15), i * 130)); break;
@@ -241,6 +270,20 @@ function toggleMute() {
   if (muted) { if (windGain) windGain.gain.setTargetAtTime(0.0001, audio.currentTime, 0.08); }
   else initAudio();
 }
+function tryDash() {
+  if (state !== 'playing' || dashT > 0 || dashCd > 0) return;
+  dashT = PARAMS.dashDur;
+  dashCd = PARAMS.dashDur + PARAMS.dashCd;
+  ball.vy = -PARAMS.dashSpeed;
+  ball.svy = -PARAMS.dashSpeed;
+  invulT = Math.max(invulT, PARAMS.dashDur + 0.05); // 冲刺期间无敌
+  zoomPunchT = Math.max(zoomPunchT, 0.1);
+  sfx('dash');
+  for (let pi = 0; pi < 14; pi++) {
+    const pa = rand(0, Math.PI * 2);
+    particles.push({ x: ball.x + Math.cos(pa) * 10, y: ball.y + Math.sin(pa) * 10, vx: Math.cos(pa) * 170, vy: Math.sin(pa) * 170 - 60, life: 0.5 });
+  }
+}
 
 // —— 状态 ——
 let state = 'menu'; // menu | playing | dying | over
@@ -249,13 +292,15 @@ let camY, gameT, gustT, gustPhase, vortex, vortexTimer, combo, comboTimer, combo
 let deathReason = '';
 let shakeT = 0, shakeAmp = 0; // 受击屏幕震动
 let zoomCur = 1, zoomPunchT = 0; // 相机缩放（速度感）与入柱前冲
-let colCount = 0, superT = 0, hurtT = 0; // 累计过柱数 / 超级加速剩余 / 受伤窗口
+let colCount = 0, superT = 0, hurtT = 0, invulT = 0; // 累计过柱数 / 超级加速剩余 / 受伤窗口 / 无敌帧
+let dashT = 0, dashCd = 0, lastTap = 0; // 主动冲刺：剩余 / 冷却 / 双击计时 / 无敌帧
 bestMeters = +(lsGet('ghfd_best', 0));
 
 function reset() {
   ball = { x: LOGIC_W / 2, y: -160, vx: 0, vy: 0, svy: 0, py: -160, r: 16, bounces: 0, hitFlash: 0 };
   zoomCur = 1; zoomPunchT = 0;
-  colCount = 0; superT = 0; hurtT = 0;
+  colCount = 0; superT = 0; hurtT = 0; invulT = 0;
+  dashT = 0; dashCd = 0;
   camY = -LOGIC_H * 0.7;
   gameT = 0; gustT = 0; gustPhase = 'gust'; // 开局就是狂风，把玩家托起来
   vortex = null; vortexTimer = rand(PARAMS.vortexEveryMin, PARAMS.vortexEveryMax);
@@ -425,6 +470,15 @@ function update(dt) {
     }
   }
   if (hurtT > 0) hurtT -= dt;
+  if (invulT > 0) invulT -= dt;
+  if (dashT > 0) {
+    dashT -= dt;
+    ball.vy = Math.min(ball.vy, -PARAMS.dashSpeed); // 冲刺期间维持冲刺速度
+    if (dashT > 0 && Math.random() < 0.8) { // 冲刺尾迹
+      particles.push({ x: ball.x + rand(-6, 6), y: ball.y + ball.r, vx: rand(-40, 40), vy: rand(120, 260), life: 0.4 });
+    }
+  }
+  if (dashCd > 0) dashCd -= dt;
 
   // 横向输入
   if (input.left) ball.vx -= PARAMS.inputAccel * dt;
@@ -518,15 +572,13 @@ function update(dt) {
   ball.ax = (ball.vx - prevVx) / dt; // 本帧真实横向加速度（供倾斜）
   ball.svy = (ball.svy ?? ball.vy) + (ball.vy - ball.svy) * Math.min(1, dt * 6); // 平滑速度（驱动相机/拉伸）
 
-  // 撞塔判定：物理反弹；带伤状态下再撞才出局（否则进入 2 秒受伤窗口，红闪提示）
+  // 撞塔判定：纯物理反弹，永不致死
   const cc = canyonCenterAt(ball.y), half = canyonHalfAt(ball.y);
   if (ball.x - ball.r < cc - half || ball.x + ball.r > cc + half) {
     ball.x = clamp(ball.x, cc - half + ball.r + 1, cc + half - ball.r - 1);
     ball.vx = -ball.vx * 0.65; // 回弹并损失部分动能
     ball.vy *= 0.92;
-    if (hurtT > 0) { die('连续撞上了光华楼墙 🧱'); return; }
-    hurtT = PARAMS.hurtWindow;
-    shakeT = 0.25; shakeAmp = 5;
+    shakeT = 0.2; shakeAmp = 4;
     sfx('bounce');
     for (let pi = 0; pi < 8; pi++) {
       const pa = rand(0, Math.PI * 2);
@@ -557,9 +609,11 @@ function update(dt) {
     // 飞出视野太远就清理
     if (d.y > camY + LOGIC_H + 500 || d.y < camY - 2500) { debrisList.splice(i, 1); continue; }
     if (Math.abs(d.x - ball.x) < d.w / 2 + ball.r * 0.8 && Math.abs(d.y - ball.y) < d.h / 2 + ball.r * 0.8) {
-      // 伤未愈再被砸 = 出局；否则进入受伤窗口
+      if (invulT > 0) continue; // 受伤后 0.1 秒无敌：免疫碰撞
+      // 伤未愈（2 秒窗口内）再被砸 = 出局；否则进入受伤窗口
       if (hurtT > 0) { die('伤上加伤，被杂物砸中 💥'); return; }
       hurtT = PARAMS.hurtWindow;
+      invulT = PARAMS.invulTime;
       // 砸中不直接死：物理碰撞——球重(3)杂物轻(1)，互相弹开，球被撞飞并眩晕
       const dx = ball.x - d.x, dy = ball.y - d.y;
       const dist = Math.hypot(dx, dy) || 1;
@@ -635,10 +689,11 @@ function update(dt) {
     if (p.life <= 0) particles.splice(i, 1);
   }
 
-  // 相机缩放：500px/s 起效、1700px/s 拉满，视野随速度明显撑开；zoomPunchT 提供吃柱瞬间的“前冲-回弹”
+  // 相机缩放：400px/s 起效、1700px/s 拉满（最大缩 22%），视野随速度明显撑开；
+  // zoomPunchT 提供吃柱瞬间的“前冲-回弹”
   zoomPunchT = Math.max(0, zoomPunchT - zoomPunchT * 7 * dt);
-  const zT = 1 - Math.min(PARAMS.camZoomOut, Math.max(0, -(ball.svy ?? ball.vy) - 500) / 1200 * PARAMS.camZoomOut) + zoomPunchT;
-  zoomCur += (zT - zoomCur) * Math.min(1, dt * 5);
+  const zT = 1 - Math.min(PARAMS.camZoomOut, Math.max(0, -(ball.svy ?? ball.vy) - 400) / 1300 * PARAMS.camZoomOut) + zoomPunchT;
+  zoomCur += (zT - zoomCur) * Math.min(1, dt * 6);
 
   // 风声随速度与风相起伏
   if (windGain) {
@@ -896,8 +951,8 @@ function drawTowers(cy, t) {
 // 地面（涂鸦草坪 + 小花 + 「光华风洞」路牌）
 function drawGround() {
   ctx.fillStyle = '#a8d18d';
-  // 草坪多涂一圈余量：视野撑开时画面底缘不露底
-  ctx.fillRect(0, 0, LOGIC_W, 560);
+  // 草坪多涂一圈余量：视野撑开/透视切片时画面底缘与左右不露底
+  ctx.fillRect(-OC_PAD, 0, LOGIC_W + OC_PAD * 2, 560);
   ctx.strokeStyle = '#4f8a3d'; ctx.lineWidth = 3;
   dLine(0, 0, LOGIC_W, 0, 999, 3);
   ctx.strokeStyle = '#5f9e4a'; ctx.lineWidth = 1.5;
@@ -1049,11 +1104,24 @@ function drawSwirl(x, y, dir, t) {
 
 // —— 渲染 ——
 function draw() {
-  ctx.clearRect(0, 0, LOGIC_W, LOGIC_H);
-
   if (state === 'menu') { drawMenu(); return; }
 
   const t = nowT();
+  // 速度透视：极快（冲刺/超高航速）时先把整个场景画到离屏画布，
+  // 再按“上窄下宽”切片合成（类似斜视的透视），并叠左右错位的色差残影
+  const warpW = state === 'playing'
+    ? (dashT > 0 ? 1 : clamp((Math.abs(ball.svy ?? 0) - PARAMS.warpStart) / (PARAMS.warpFull - PARAMS.warpStart), 0, 1))
+    : 0;
+  const useOC = warpW > 0.02;
+  const mainCtx = ctx;
+  if (useOC) {
+    ensureOC();
+    ocCtx.setTransform(1, 0, 0, 1, OC_PAD, 0);
+    ocCtx.clearRect(-OC_PAD, 0, LOGIC_W + OC_PAD * 2, LOGIC_H);
+    ctx = ocCtx;
+  } else {
+    ctx.clearRect(0, 0, LOGIC_W, LOGIC_H);
+  }
   ctx.save();
   // 受击屏幕震动（整屏轻微抖动，幅度随剩余时间衰减）
   if (shakeT > 0) {
@@ -1150,6 +1218,29 @@ function draw() {
 
   ctx.restore();
 
+  if (useOC) {
+    // 把离屏画面按“上窄下宽”切片合成回主画布（锚点在画面中部）
+    ctx = mainCtx;
+    drawSky(camY); // 打底：补顶部两角收缩后的缝隙
+    const slices = 36, sh = LOGIC_H / slices, anchorX = LOGIC_W / 2;
+    const composeStrips = (extraX, alpha) => {
+      ctx.globalAlpha = alpha;
+      for (let i = 0; i < slices; i++) {
+        const f = 1 + warpW * (((i + 0.5) / slices) * 2 - 1) * PARAMS.warpStrength;
+        const destW = (LOGIC_W + OC_PAD * 2) * f;
+        const destX = anchorX - (anchorX + OC_PAD) * f + extraX;
+        ctx.drawImage(oc, 0, i * sh, oc.width, sh, destX, i * sh, destW, sh);
+      }
+      ctx.globalAlpha = 1;
+    };
+    composeStrips(0, 1); // 主层
+    if (warpW > 0.25) { // 高速色差/残影：同一透视下左右错位轻叠（浅色画面用 source-over 防过曝）
+      const off = 2 + warpW * 2.5;
+      composeStrips(off, 0.09 + warpW * 0.06);
+      composeStrips(-off, 0.09 + warpW * 0.06);
+    }
+  }
+
   drawHUD();
 
   if (state === 'over') drawOver();
@@ -1236,6 +1327,18 @@ function drawHUD() {
     }
   }
 
+  // 冲刺冷却（屏幕底部中央细条：白=冲刺中，金=冷却，青=就绪）
+  const dw2 = 140, dx2 = (LOGIC_W - dw2) / 2, dy2 = LOGIC_H - 12;
+  const dFill = dashT > 0 ? 1 : 1 - Math.max(0, dashCd) / PARAMS.dashCd;
+  ctx.lineCap = 'round'; ctx.lineWidth = 5;
+  ctx.strokeStyle = 'rgba(120,120,130,0.3)';
+  ctx.beginPath(); ctx.moveTo(dx2 + 3, dy2); ctx.lineTo(dx2 + dw2 - 3, dy2); ctx.stroke();
+  ctx.strokeStyle = dashT > 0 ? 'rgba(255,255,255,0.95)'
+    : dFill >= 1 ? `rgba(80,200,170,${0.55 + 0.3 * Math.sin(nowT() * 6)})`
+    : 'rgba(230,180,60,0.7)';
+  ctx.beginPath(); ctx.moveTo(dx2 + 3, dy2); ctx.lineTo(dx2 + 3 + Math.max(3, dFill * (dw2 - 6)), dy2); ctx.stroke();
+  ctx.lineCap = 'butt';
+
   // 静音按钮（右上角小喇叭；点击或按 M 切换）
   ctx.save();
   ctx.translate(LOGIC_W - 22, 24);
@@ -1289,10 +1392,11 @@ function drawMenu() {
   drawSwirl(88, 264, 1, t);
   drawSwirl(LOGIC_W - 88, 264, -1, t);
 
-  ctx.font = '17px sans-serif'; ctx.fillStyle = '#5b4636';
-  ctx.fillText('按住屏幕左右半边（或 ←→ 键）横移', LOGIC_W / 2, 320);
-  ctx.fillText('上升全靠吃风柱：钻进窄缝中心升力翻倍', LOGIC_W / 2, 348);
-  ctx.fillText('别撞楼、别被杂物砸中、别掉下去', LOGIC_W / 2, 376);
+  ctx.font = '16px sans-serif'; ctx.fillStyle = '#5b4636';
+  ctx.fillText('按住屏幕左右半边（或 ←→ 键）横移', LOGIC_W / 2, 308);
+  ctx.fillText('钻风柱窄缝升力翻倍，连过 5 根触发超级加速', LOGIC_W / 2, 336);
+  ctx.fillText('双击屏幕 / W 键冲刺：冲刺时无敌', LOGIC_W / 2, 364);
+  ctx.fillText('撞墙只会弹开；带伤时再被杂物砸中才出局', LOGIC_W / 2, 392);
 
   // 开始按钮：手绘圈带“沸腾线”抖动 + 呼吸脉冲
   const pulse = 1 + Math.sin(t * 2.6) * 0.035;
