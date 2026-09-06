@@ -79,7 +79,7 @@ const PARAMS = {
 
   // —— 换算与生成 ——
   pxPerMeter: 14,      // 多少像素算 1 米（142m≈光华楼顶）
-  difficultyPerMeter: 0.004, // 难度随高度增长系数
+  difficultyPerMeter: 0.000025, // 难度随真实海拔（米）增长：100km 卡门线处达到满难度
   diffCap: 2.5,        // 难度系数上限（主要影响涡流频率）
 
   // —— 加速反馈 ——
@@ -97,8 +97,8 @@ const PARAMS = {
   canyonNarrowMax: 18,        // 收窄上限
   wobbleGrowPerMeter: 0.0027, // 峡谷摆动幅度增长系数
   wobbleGrowMax: 0.8,         // 摆动增幅上限（最多 ×1.8）
-  debrisCountMax: 5,          // 每阵狂风杂物数量上限
-  debrisEveryMeter: 150,      // 每上升多少米多 1 个杂物
+debrisCountMax: 3,          // 每阵狂风杂物数量上限
+debrisEveryMeter: 250,      // 每上升多少米多 1 个杂物
 };
 
 /* ------------------------------------------------------------
@@ -270,6 +270,49 @@ function toggleMute() {
   if (muted) { if (windGain) windGain.gain.setTargetAtTime(0.0001, audio.currentTime, 0.08); }
   else initAudio();
 }
+
+// —— 排行榜：数据存在本仓库的 Issues 里（匿名可读；提交需要精细令牌，仅授本仓库 Issues 读写） ——
+const REPO_ISSUES = 'https://api.github.com/repos/Nomuber/guanghua-fengdong/issues';
+const LB_TOKEN = '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'; // 精细令牌（仅 Issues 读写本仓库）
+let lbData = null, lbRank = 0;
+async function lbLoad() {
+  try {
+    const r = await fetch(REPO_ISSUES + '?state=all&per_page=100', { signal: AbortSignal.timeout(6000) });
+    if (!r.ok) return;
+    const list = await r.json();
+    const rows = [];
+    for (const it of list) {
+      try {
+        const b = JSON.parse(it.body || '');
+        if (b && typeof b.a === 'number') rows.push({ n: String(b.n || '无名选手').slice(0, 12), a: b.a, t: String(b.t || ''), d: String(b.d || '') });
+      } catch {}
+    }
+    rows.sort((x, y) => y.a - x.a);
+    lbData = rows.slice(0, 10);
+  } catch {}
+}
+async function lbSubmit() {
+  if (maxMeters <= 0) return;
+  try {
+    let name = lsGet('ghfd_name', '');
+    if (!name) {
+      name = prompt('这局成绩将进入排行榜，留个名字：', '无名选手') || '无名选手';
+      lsSet('ghfd_name', name);
+    }
+    const entry = { n: name.slice(0, 12), a: maxMeters, t: titleOf(maxMeters), d: new Date().toISOString().slice(0, 10) };
+    const list = (await lbLoad()) || [];
+    list.push(entry);
+    list.sort((x, y) => y.a - x.a);
+    lbData = list.slice(0, 10);
+    lbRank = list.findIndex((e) => e.a === entry.a && e.n === entry.n && e.d === entry.d) + 1;
+    if (!LB_TOKEN) { lbRank = 0; return; } // 未配置令牌：不上传，仅本机查看
+    await fetch(REPO_ISSUES, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + LB_TOKEN, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: '🏆 ' + entry.a + 'm ' + entry.n, body: JSON.stringify(entry) }),
+    });
+  } catch {}
+}
 function tryDash() {
   if (state !== 'playing' || dashT > 0 || dashCd > 0) return;
   dashT = PARAMS.dashDur;
@@ -385,7 +428,20 @@ function die(reason) {
   sfx('die');
 }
 
-function metersOf(y) { return Math.max(0, Math.round(-y / PARAMS.pxPerMeter)); }
+// 真实海拔换算（米）：低空 14px=1m；飞过光华楼顶（142m）后比例逐渐压缩，
+// 让真实大气里程碑都落在可到达的高度上——
+// 低积云 500-2500m、卷云/民航 6000-10000m、天空变黑 ~12km、
+// 平流层地球弧线 19-34km、中间层流星 ~72km、卡门线（太空边界）100km、
+// 极光 100-300km、国际空间站轨道 ~400km。
+// 换算本身二次加速——高度数值越飞涨得越快
+const ALT_P0 = 5000, ALT_L = 245; // 压缩起点（约 357m）与压缩系数
+function altOf(y) {
+  const p = Math.max(0, -y);
+  const d = Math.max(0, p - ALT_P0);
+  return Math.round(p / 14 + d * d / (28 * ALT_L));
+}
+// 高度显示格式：1 万米以上改用千米（真实航空习惯）
+function fmtAlt(m) { return m >= 10000 ? (m / 1000).toFixed(1) + ' km' : m + ' m'; }
 
 function landmark(m) {
   if (m < 15) return '还在邯郸路上空…';
@@ -393,18 +449,30 @@ function landmark(m) {
   if (m < 80) return '超过了辰光超市天花板';
   if (m < 120) return '超过了文科图书馆';
   if (m < 142) return '即将抵达光华楼顶！';
-  if (m < 200) return '已超越光华楼顶，师大遥遥相望';
-  if (m < 300) return '进入复旦对流层';
-  return '欢迎来到复旦平流层 🧑‍🚀';
+  if (m < 300) return '光华楼顶之上';
+  if (m < 2500) return '低云层 ☁️';
+  if (m < 6000) return '中云层 ☁️';
+  if (m < 12000) return '卷云层 ✈️';
+  if (m < 50000) return '平流层 🌍';
+  if (m < 85000) return '中间层 💫';
+  if (m < 100000) return '热层边缘 🚀';
+  if (m < 420000) return '热层 · 太空 🧑‍🚀';
+  return '空间站轨道 🛰️';
 }
 function titleOf(m) {
   if (m < 20) return '落叶级选手 🍂';
   if (m < 60) return '伞面翻转变形者 ☂️';
   if (m < 100) return '外卖保卫者 🛵';
   if (m < 150) return '光华楼常驻居民 🏢';
-  if (m < 250) return '风系大法师 🌪️';
-  if (m < 400) return '邯郸路气象台荣誉台长 📡';
-  return '复旦平流层守门人 🧑‍🚀';
+  if (m < 300) return '风系大法师 🌪️';
+  if (m < 600) return '穿云高手 ☁️';
+  if (m < 2500) return '云上飞人 🕊️';
+  if (m < 10000) return '民航高度共行者 ✈️';
+  if (m < 20000) return '对流层顶攀登者 🌗';
+  if (m < 50000) return '平流层冲浪者 🏄';
+  if (m < 100000) return '卡门线挑战者 🚀';
+  if (m < 400000) return '近太空宇航员 🧑‍🚀';
+  return '空间站常客 🛰️';
 }
 
 // —— 更新 ——
@@ -428,6 +496,7 @@ function update(dt) {
         ball.vy = -ball.vy * 0.45; ball.vx *= 0.6; ball.bounces++;
       } else if (ball.deathT > 1.2) {
         if (maxMeters > bestMeters) { bestMeters = maxMeters; lsSet('ghfd_best', bestMeters); sfx('record'); }
+        lbSubmit();
         state = 'over';
       }
     }
@@ -592,10 +661,20 @@ function update(dt) {
   // 杂物：纯抛物线（只有重力），发射初速度已算好让它恰好越过角色头顶
   for (let i = debrisList.length - 1; i >= 0; i--) {
     const d = debrisList[i];
-    // 狂风期：复制角色的实时真实加速度 ball.ay（含风柱加成）→ 相对速度永远≈出手差值，一定追得上
-    // 平静期：只受自身轻重力，加速落下（角色在滑翔）→ 从头顶掉下来
-    const ay = gusting ? (ball.ay ?? (PARAMS.gustLift - PARAMS.gravity)) : PARAMS.debrisFallGravity;
+    // 狂风期：杂物感受“气象级”托力（净浮力缓缓上浮；不复制角色瞬时爆发，冲刺不会带着杂物窜天）
+    // 滑翔期：杂物受自身轻重力，加速落下
+    const ay = gusting ? (PARAMS.gravity - PARAMS.gustLift) : PARAMS.debrisFallGravity;
     d.vy += ay * dt;
+    // 杂物也吃风柱：位于风柱内的杂物获得与角色一致的升力（核心区翻倍，限速防瞬移）
+    if (gusting || PARAMS.calmColumns) {
+      for (const c of columns) {
+        if (Math.abs(d.x - c.x) < PARAMS.columnWidth / 2 && d.y > c.y + 20 && d.y < c.y + 170) {
+          d.vy -= (Math.abs(d.x - c.x) < PARAMS.columnCore / 2 ? PARAMS.columnLift * PARAMS.columnCoreBonus : PARAMS.columnLift) * dt;
+          if (d.vy < -1200) d.vy = -1200;
+          break;
+        }
+      }
+    }
     // 横向 = 发射初速 + 湍流摇摆（纸片感）
     d.x += (d.vx + Math.sin(gameT * d.swayFreq + d.swayPhase) * d.swayAmp) * dt;
     d.y += d.vy * dt;
@@ -674,7 +753,7 @@ function update(dt) {
   // 风柱生成与清理
   genColumnsUpTo(camY - 1200);
   columns = columns.filter((c) => c.y < camY + LOGIC_H + 300);
-  maxMeters = Math.max(maxMeters, metersOf(ball.y));
+  maxMeters = Math.max(maxMeters, altOf(ball.y));
 
   // 风粒子
   if (gusting && Math.random() < 0.5) {
@@ -787,25 +866,84 @@ function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 
 /* ---------- 场景绘制（draw 与菜单背景共用） ---------- */
 
-// 天空渐变（越高越蓝；屏幕空间绘制）
+// 天空渐变：3-12km 天蓝转深蓝，12-27km 深蓝转近黑（真实：约 20km 以上天顶近黑）
 function drawSky(cy) {
-  const skyTop = Math.min(1, Math.max(0, -cy / (400 * PARAMS.pxPerMeter)));
-  const g = ctx.createLinearGradient(0, 0, 0, LOGIC_H);
-  g.addColorStop(0, `rgb(${232 - skyTop * 130}, ${244 - skyTop * 100}, ${248 - skyTop * 40})`);
-  g.addColorStop(1, `rgb(${232 - skyTop * 55}, ${244 - skyTop * 40}, ${248 - skyTop * 15})`);
+  const alt = altOf(cy);
+  const s1 = Math.min(1, Math.max(0, (alt - 3000) / 9000));
+  const s2 = Math.max(0, Math.min(1, (alt - 12000) / 15000));
+  const lerp3 = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+  const top = lerp3([232, 244, 248], lerp3([84, 118, 178], [10, 14, 40], s2), s1);
+  const bot = lerp3([224, 240, 246], lerp3([142, 172, 206], [40, 56, 100], s2), s1);
+  const g = ctx.createLinearGradient(0, -100, 0, LOGIC_H + 100);
+  g.addColorStop(0, `rgb(${top.map(Math.round)})`);
+  g.addColorStop(1, `rgb(${bot.map(Math.round)})`);
   ctx.fillStyle = g;
-  // 多涂一圈余量：视野撑开（缩小）时边缘不露底
+  // 多涂一圈余量：视野撑开（缩小）与透视切片时边缘不露底
   ctx.fillRect(-100, -100, LOGIC_W + 200, LOGIC_H + 200);
 }
 
-// 高空氛围：太阳、漂云、星月（垂直视差装饰层，屏幕空间）
-function drawCloudsStars(cy, t) {
-  const m = -cy / PARAMS.pxPerMeter; // 相机高度（米）
+// 远景楼群：地平线上的城市剪影（视差装饰层，屏幕空间）。
+// 随高度上升整体下沉并缩小——模拟“越飞越高、城市在脚下远去”的俯瞰视角
+function drawSkyline(cy, t) {
+  const alt = altOf(cy);
+  const vis = clamp(1 - alt / 1800, 0, 1); // 1.8km 处完全沉出画面
+  if (vis <= 0) return;
+  const shrink = 1 - Math.min(0.45, alt / 1600); // 越高越小（俯瞰透视）
+  const rows = [
+    { k: 0.4, base: 92, col: `rgba(162,176,200,${(0.5 * vis).toFixed(3)})`, lit: (0.10 * vis).toFixed(3) },
+    { k: 0.55, base: 132, col: `rgba(106,122,152,${(0.62 * vis).toFixed(3)})`, lit: (0.16 * vis).toFixed(3) },
+  ];
+  for (const r of rows) {
+    const baseY = 318 + alt * r.k; // 城市地平线在草坪远端之上，随爬升缓缓下沉
+    ctx.save();
+    ctx.translate(0, baseY);
+    ctx.scale(shrink, shrink);
+    ctx.fillStyle = r.col;
+    for (let i = 0; i < 14; i++) {
+      const bx = -20 + (i / 13) * (LOGIC_W + 40) + (srand(i * 3.3 + r.k) - 0.5) * 26;
+      const bw = 30 + srand(i * 7.1 + r.k) * 34;
+      const bh = 46 + srand(i * 5.7 + r.k) * r.base;
+      ctx.fillRect(bx - bw / 2, -bh, bw, bh + 6);
+      if (srand(i * 11.3 + r.k) > 0.55) ctx.fillRect(bx - 1, -bh - 13, 2, 13); // 天线
+      for (let wI = 0; wI < 3; wI++) { // 稀疏亮窗
+        if (srand(i * 13.7 + wI * 3.1 + r.k) > 0.5) {
+          ctx.fillStyle = `rgba(255,214,120,${r.lit})`;
+          ctx.fillRect(bx - bw / 2 + 5 + wI * (bw / 3.4), -bh + 9 + wI * 13, 4, 5);
+          ctx.fillStyle = r.col;
+        }
+      }
+    }
+    ctx.strokeStyle = r.col; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-40, 2); ctx.lineTo(LOGIC_W + 40, 2); ctx.stroke(); // 地平线
+    ctx.restore();
+  }
+}
 
-  // 太阳：低空挂着，随爬升缓缓下沉、淡出
-  const sunA = clamp(1 - (m - 110) / 70, 0, 1);
+// 不规则圆斑（地球大陆/云系用）
+function wobblyBlob(cx0, cy0, rw, rh, seed) {
+  ctx.beginPath();
+  const N = 12;
+  for (let i = 0; i <= N; i++) {
+    const a = (i / N) * Math.PI * 2;
+    const rr = 1 + (srand(seed + i * 1.7) - 0.5) * 0.38;
+    const px = cx0 + Math.cos(a) * rw * 0.5 * rr;
+    const py = cy0 + Math.sin(a) * rh * 0.5 * rr;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+
+// 高空氛围：太阳、双层云、星月银河、流星卫星、极光、地球弧线
+// 层级触发全部对应真实大气数据（altOf 换算的真实海拔，单位米）
+function drawCloudsStars(cy, t) {
+  const alt = altOf(cy);                                        // 相机真实海拔（米）
+  const s2 = Math.max(0, Math.min(1, (alt - 12000) / 15000));   // 天空变黑程度（12-27km）
+
+  // 太阳：低空挂着，2-7km 间缓缓下沉、淡出
+  const sunA = clamp(1 - (alt - 2000) / 5000, 0, 1);
   if (sunA > 0) {
-    const sx = LOGIC_W - 76, sy = 92 + m * 0.32;
+    const sx = LOGIC_W - 76, sy = 92 + Math.min(80, alt * 0.008);
     ctx.save();
     ctx.globalAlpha = sunA * 0.9;
     ctx.fillStyle = 'rgba(255,216,140,0.5)';
@@ -819,8 +957,11 @@ function drawCloudsStars(cy, t) {
     ctx.restore();
   }
 
-  // 云：视差 0.45，缓慢横漂，偶尔画一张打瞌睡的云脸；高空淡出
-  const cloudA = clamp(1 - (m - 210) / 90, 0, 1);
+  // 远景楼群：城市在你脚下慢慢远去
+  drawSkyline(cy, t);
+
+  // 云层 1：低空积云（真实：积云底约 500-1000m，云顶 2000-2500m）
+  const cloudA = clamp(1 - (alt - 1800) / 700, 0, 1);
   if (cloudA > 0) {
     const par = 0.45, sp = 300;
     const lo = Math.floor((cy * par - 140) / sp), hi = Math.ceil((cy * par + LOGIC_H + 140) / sp);
@@ -853,17 +994,60 @@ function drawCloudsStars(cy, t) {
     }
   }
 
-  // 星星 + 月亮：高空淡入（视差 0.15，几乎固定在屏幕上）
-  const starA = clamp((m - 150) / 80, 0, 1);
+  // 云层 2：中云与卷云带（真实：中云 2500-6000m、卷云 6000-12000m）
+  const cloud2A = Math.min(1, Math.max(0, (alt - 2500) / 600)) * Math.max(0, Math.min(1, (12000 - alt) / 600));
+  if (cloud2A > 0) {
+    const par = 0.55, sp = 170;
+    const lo = Math.floor((cy * par - 120) / sp), hi = Math.ceil((cy * par + LOGIC_H + 120) / sp);
+    for (let i = lo; i <= hi; i++) {
+      const sy = i * sp - cy * par + srand(i * 29.7) * 100;
+      if (sy < -50 || sy > LOGIC_H + 50) continue;
+      const drift = ((t * (4 + srand(i * 7) * 5) + srand(i * 11) * 900) % (LOGIC_W + 200)) - 100;
+      const sc = 0.45 + srand(i * 19) * 0.5;
+      ctx.save();
+      ctx.translate(drift, sy);
+      ctx.scale(sc, sc);
+      ctx.globalAlpha = cloud2A * (0.35 + srand(i * 13) * 0.25);
+      ctx.fillStyle = 'rgba(198,213,235,0.8)';
+      ctx.strokeStyle = 'rgba(92,112,146,0.45)'; ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(-26, 5);
+      ctx.arc(-15, 1, 11, Math.PI * 0.9, Math.PI * 1.85);
+      ctx.arc(1, -6, 13, Math.PI * 1.05, Math.PI * 1.9);
+      ctx.arc(17, -1, 10, Math.PI * 1.15, Math.PI * 2.02);
+      ctx.lineTo(26, 5);
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // 银河带：深入太空后浮现的斜向光带
+  if (s2 > 0.35) {
+    ctx.save();
+    ctx.translate(LOGIC_W / 2, LOGIC_H / 2);
+    ctx.rotate(-0.5);
+    const mg = ctx.createLinearGradient(0, -95, 0, 95);
+    mg.addColorStop(0, 'rgba(200,214,255,0)');
+    mg.addColorStop(0.5, `rgba(206,218,255,${((s2 - 0.35) / 0.65 * 0.1).toFixed(3)})`);
+    mg.addColorStop(1, 'rgba(200,214,255,0)');
+    ctx.fillStyle = mg;
+    ctx.fillRect(-700, -95, 1400, 190);
+    ctx.restore();
+  }
+
+  // 星星 + 月亮：高空淡入（视差 0.15）；深入太空后星星更密更亮
+  const starA = clamp((alt - 8000) / 12000, 0, 1); // 星星：天空变暗即显现（真实：约 20km+ 白昼可见星空）
   if (starA > 0) {
     const par = 0.15, sp = 130;
+    const bright = 0.75 + 0.25 * s2;
     const lo = Math.floor((cy * par - 40) / sp), hi = Math.ceil((cy * par + LOGIC_H + 40) / sp);
     for (let i = lo; i <= hi; i++) {
       const sy = i * sp - cy * par;
       const sx = srand(i * 13.7) * LOGIC_W;
       const tw = 0.45 + 0.4 * Math.sin(t * (1 + srand(i) * 1.4) + i * 2.4);
       const r = 1.1 + srand(i * 7) * 1.5;
-      ctx.fillStyle = `rgba(255,253,240,${starA * tw})`;
+      ctx.fillStyle = `rgba(255,253,240,${starA * tw * bright})`;
       ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2); ctx.fill();
       if (srand(i * 3) > 0.72) {
         ctx.strokeStyle = `rgba(255,253,240,${starA * tw * 0.7})`; ctx.lineWidth = 1;
@@ -871,7 +1055,19 @@ function drawCloudsStars(cy, t) {
         dLine(sx, sy - 4, sx, sy + 4, i + 1, 1);
       }
     }
-    const moonA = clamp((m - 130) / 60, 0, 1);
+    // 深空微星群：太空化后浮现的第二层密星
+    if (s2 > 0.4) {
+      const mA = (s2 - 0.4) / 0.6;
+      const lo2 = Math.floor((cy * par - 40) / 64), hi2 = Math.ceil((cy * par + LOGIC_H + 40) / 64);
+      for (let i = lo2; i <= hi2; i++) {
+        const sy2 = i * 64 - cy * par;
+        const sx2 = srand(i * 7.31) * LOGIC_W;
+        const tw2 = 0.3 + 0.5 * Math.sin(t * 1.6 + i * 3.1);
+        ctx.fillStyle = `rgba(235,240,255,${(mA * 0.55 * tw2).toFixed(3)})`;
+        ctx.fillRect(sx2, sy2, 1.4, 1.4);
+      }
+    }
+    const moonA = clamp((alt - 6000) / 6000, 0, 1); // 月亮：6-12km 淡入
     const mx = 64, my = 128 - cy * 0.004;
     ctx.save();
     ctx.globalAlpha = moonA * 0.95;
@@ -883,6 +1079,110 @@ function drawCloudsStars(cy, t) {
     ctx.strokeStyle = 'rgba(150,160,180,0.65)'; ctx.lineWidth = 1.5;
     dCircle(mx, my, 20, 71, 1.5);
     ctx.restore();
+  }
+
+  // 流星：真实中间层 75-100km 燃尽，高空偶发划过（确定性循环，无状态）
+  if (starA > 0.3 && alt > 70000) {
+    for (let k = 0; k < 2; k++) {
+      const prog = (t / 9 + k * 0.47) % 1;
+      if (prog < 0.14) {
+        const mp = prog / 0.14;
+        const mx = LOGIC_W * (0.12 + 0.6 * ((k * 0.37) % 1)) + mp * 300;
+        const my = 36 + k * 100 + mp * 230;
+        const tl = 1 - mp * 0.7;
+        const mg2 = ctx.createLinearGradient(mx, my, mx - 76, my - 36);
+        mg2.addColorStop(0, `rgba(255,255,255,${(starA * 0.9 * tl).toFixed(3)})`);
+        mg2.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.strokeStyle = mg2; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(mx - 76, my - 36); ctx.stroke();
+        ctx.fillStyle = `rgba(255,255,255,${(starA * tl).toFixed(3)})`;
+        ctx.beginPath(); ctx.arc(mx, my, 2, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  }
+
+  // 卫星：真实低轨道 160km+ 缓慢横移 + 红灯闪烁
+  if (alt > 150000) {
+    const satx = LOGIC_W + 40 - ((t * 26) % (LOGIC_W + 120));
+    const saty = 60 + (Math.sin(t * 0.3) * 0.5 + 0.5) * 70;
+    ctx.save();
+    ctx.globalAlpha = s2 * 0.9;
+    ctx.fillStyle = 'rgba(205,215,232,0.95)';
+    ctx.fillRect(satx - 3, saty - 1, 6, 2);
+    ctx.fillStyle = Math.sin(t * 5) > 0.2 ? 'rgba(255,90,70,0.95)' : 'rgba(255,90,70,0.25)';
+    ctx.fillRect(satx + 4, saty - 1, 2, 2);
+    ctx.restore();
+  }
+
+  // 极光：真实热层 100-300km（太阳带电粒子激发的绿色光幕）
+  const aurA = Math.max(0, Math.min(1, (alt - 100000) / 40000)) * Math.max(0, Math.min(1, (350000 - alt) / 50000));
+  if (aurA > 0) {
+    for (let k = 0; k < 3; k++) {
+      const bx = LOGIC_W * (0.2 + k * 0.28) + Math.sin(t * 0.4 + k * 2.1) * 40;
+      const w = 62;
+      ctx.beginPath();
+      for (let seg = 0; seg <= 6; seg++) {
+        const yy = -40 + LOGIC_H * 0.55 * (seg / 6);
+        const xo = Math.sin(t * 0.6 + k * 2 + seg * 1.1) * 30;
+        if (seg === 0) ctx.moveTo(bx + xo - w / 2, yy); else ctx.lineTo(bx + xo - w / 2, yy);
+      }
+      for (let seg = 6; seg >= 0; seg--) {
+        const yy = -40 + LOGIC_H * 0.55 * (seg / 6);
+        const xo = Math.sin(t * 0.6 + k * 2 + seg * 1.1) * 30;
+        ctx.lineTo(bx + xo + w / 2, yy);
+      }
+      ctx.closePath();
+      const ag = ctx.createLinearGradient(0, -40, 0, LOGIC_H * 0.51);
+      ag.addColorStop(0, `rgba(70,235,165,${(0.17 * aurA).toFixed(3)})`);
+      ag.addColorStop(1, 'rgba(70,235,165,0)');
+      ctx.fillStyle = ag;
+      ctx.fill();
+    }
+  }
+
+  // 地球：真实平流层 19km 起弧线显现，越高升起越多，显出海洋/大陆/云系——外太空拍的地球
+  const limb = Math.max(0, Math.min(1, (alt - 19000) / 15000));
+  if (limb > 0) {
+    const R = 3000, ecx = LOGIC_W / 2, ecy = LOGIC_H + R - 40 - limb * 340;
+    const topY = ecy - R;
+    ctx.save();
+    ctx.beginPath(); ctx.arc(ecx, ecy, R, 0, Math.PI * 2); ctx.clip();
+    // 海洋
+    const og = ctx.createLinearGradient(0, topY - 30, 0, topY + 420);
+    og.addColorStop(0, '#1e5398');
+    og.addColorStop(0.55, '#16407c');
+    og.addColorStop(1, '#0e2c5c');
+    ctx.fillStyle = og;
+    ctx.fillRect(ecx - R, topY - 30, R * 2, R);
+    // 大陆板块（固定在星球表面）
+    const conts = [
+      [-760, 130, 500, 300], [-150, 220, 660, 340], [500, 160, 520, 280], [1020, 260, 560, 300], [-1240, 250, 520, 300],
+    ];
+    for (let ci = 0; ci < conts.length; ci++) {
+      const [dx, D, rw, rh] = conts[ci];
+      ctx.fillStyle = ci % 2 === 0 ? 'rgba(74,128,86,0.95)' : 'rgba(94,138,90,0.95)';
+      wobblyBlob(ecx + dx, topY + D, rw, rh, 40 + ci * 17);
+    }
+    // 地表云系
+    const swirls = [[-430, 100, 320, 90], [90, 170, 400, 100], [650, 100, 270, 80], [-40, 330, 360, 90]];
+    for (let si = 0; si < swirls.length; si++) {
+      const [dx, D, rw, rh] = swirls[si];
+      ctx.fillStyle = 'rgba(240,248,255,0.4)';
+      wobblyBlob(ecx + dx, topY + D, rw, rh, 90 + si * 23);
+    }
+    ctx.restore();
+    // 大气辉光带 + 亮边
+    const ag = ctx.createLinearGradient(0, topY - 46, 0, topY + 8);
+    ag.addColorStop(0, 'rgba(110,180,255,0)');
+    ag.addColorStop(1, `rgba(120,190,255,${(0.4 * limb).toFixed(3)})`);
+    ctx.fillStyle = ag;
+    ctx.fillRect(ecx - R, topY - 46, R * 2, 54);
+    ctx.strokeStyle = `rgba(120,190,255,${(0.5 * limb).toFixed(3)})`;
+    ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(ecx, ecy, R, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = `rgba(190,230,255,${(0.8 * limb).toFixed(3)})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(ecx, ecy, R - 5, 0, Math.PI * 2); ctx.stroke();
   }
 }
 
@@ -1251,9 +1551,9 @@ function drawHUD() {
   ctx.textAlign = 'center';
   ctx.font = 'bold 34px sans-serif';
   ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 6; ctx.lineJoin = 'round';
-  ctx.strokeText(maxMeters + ' m', LOGIC_W / 2, 54);
+  ctx.strokeText(fmtAlt(maxMeters), LOGIC_W / 2, 54);
   ctx.fillStyle = '#234';
-  ctx.fillText(maxMeters + ' m', LOGIC_W / 2, 54);
+  ctx.fillText(fmtAlt(maxMeters), LOGIC_W / 2, 54);
   ctx.font = '14px sans-serif';
   ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 3;
   ctx.strokeText(landmark(maxMeters), LOGIC_W / 2, 76);
@@ -1386,7 +1686,7 @@ function drawMenu() {
   ctx.textAlign = 'center';
   // 标题 + 手绘下划线 + 两侧小风旋
   ctx.fillStyle = '#2d3748'; ctx.font = 'bold 36px "Segoe Print","Comic Sans MS",sans-serif';
-  ctx.fillText('光华风洞·乘风者', LOGIC_W / 2, 230);
+  ctx.fillText('光华楼风洞享受者', LOGIC_W / 2, 230);
   ctx.strokeStyle = '#e67e22';
   dLine(LOGIC_W / 2 - 150, 248, LOGIC_W / 2 + 150, 244, 77, 3);
   drawSwirl(88, 264, 1, t);
@@ -1411,7 +1711,7 @@ function drawMenu() {
 
   if (bestMeters > 0) {
     ctx.fillStyle = '#5b4636'; ctx.font = '15px sans-serif';
-    ctx.fillText('最高纪录：' + bestMeters + ' m', LOGIC_W / 2, 596);
+    ctx.fillText('最高纪录：' + fmtAlt(bestMeters), LOGIC_W / 2, 596);
     // 小三角旗（随风轻摆）
     ctx.strokeStyle = '#8a7a5c'; ctx.lineWidth = 1.5;
     dLine(LOGIC_W / 2 - 96, 590, LOGIC_W / 2 - 96, 572, 61, 1.5);
@@ -1421,6 +1721,13 @@ function drawMenu() {
     ctx.lineTo(LOGIC_W / 2 - 81, 576 + Math.sin(t * 2.5) * 1.5);
     ctx.lineTo(LOGIC_W / 2 - 96, 580);
     ctx.closePath(); ctx.fill();
+  }
+  if (lbData && lbData.length) { // 排行榜前三（数据存在仓库 Issues）
+    ctx.fillStyle = '#8a7a5c'; ctx.font = '13px sans-serif';
+    ctx.fillText('🏆 排行榜', LOGIC_W / 2, 624);
+    lbData.slice(0, 3).forEach((e, i) => {
+      ctx.fillText((i + 1) + '. ' + e.n + '　' + fmtAlt(e.a), LOGIC_W / 2, 648 + i * 21);
+    });
   }
 }
 
@@ -1450,14 +1757,18 @@ function drawOver() {
   ctx.fillStyle = '#8a3033'; ctx.font = 'bold 24px sans-serif';
   ctx.fillText(deathReason, 0, -110);
   ctx.fillStyle = '#2d3748'; ctx.font = 'bold 54px "Segoe Print","Comic Sans MS",sans-serif';
-  ctx.fillText(maxMeters + ' m', 0, -30);
+  ctx.fillText(fmtAlt(maxMeters), 0, -30);
   ctx.strokeStyle = '#e67e22';
   dLine(-100, -14, 100, -18, 66, 3);
   ctx.fillStyle = '#5b4636'; ctx.font = '18px sans-serif';
   ctx.fillText(titleOf(maxMeters), 0, 30);
   ctx.fillText(landmark(maxMeters), 0, 60);
   ctx.fillStyle = '#b8860b'; ctx.font = '15px sans-serif';
-  ctx.fillText('最高纪录：' + bestMeters + ' m' + (maxMeters >= bestMeters ? ' 🎉新纪录!' : ''), 0, 100);
+  ctx.fillText('最高纪录：' + fmtAlt(bestMeters) + (maxMeters >= bestMeters ? ' 🎉新纪录!' : ''), 0, 100);
+  if (lbRank > 0) { // 上了排行榜时显示名次
+    ctx.fillStyle = '#8a3033'; ctx.font = '14px sans-serif';
+    ctx.fillText('排行榜：第 ' + lbRank + ' 名', 0, 122);
+  }
   // 新纪录：便签四周闪手绘小星光
   if (maxMeters >= bestMeters && bestMeters > 0) {
     const t2 = nowT();
@@ -1488,4 +1799,5 @@ function loop(now) {
   requestAnimationFrame(loop);
 }
 reset();
+lbLoad();
 requestAnimationFrame(loop);
