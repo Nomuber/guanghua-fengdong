@@ -16,3 +16,23 @@ canvas {
   box-shadow: 0 0 46px rgba(0, 0, 0, 0.4);
   touch-action: none;
 }
+
+/* 昵称输入框：开局时悬浮在画布上 */
+#nameInput {
+  display: none;
+  position: absolute;
+  left: 50%;
+  top: 44%;
+  transform: translate(-50%, -50%);
+  width: 250px;
+  padding: 12px 16px;
+  font: 18px/1.2 sans-serif;
+  text-align: center;
+  color: #2d3748;
+  background: #fffbe8;
+  border: 3px solid #e67e22;
+  border-radius: 8px;
+  outline: none;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.25);
+  z-index: 10;
+}

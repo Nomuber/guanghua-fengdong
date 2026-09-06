@@ -116,6 +116,30 @@ function ensureOC() {
   oc.height = LOGIC_H;
   ocCtx = oc.getContext('2d');
 }
+const nameInput = document.getElementById('nameInput'); // 昵称输入框（开局悬浮）
+let nameInputOpen = false;
+function openNameInput() {
+  nameInputOpen = true;
+  nameInput.style.display = 'block';
+  nameInput.value = lsGet('ghfd_name', '无名选手');
+  setTimeout(() => { try { nameInput.focus(); nameInput.select(); } catch {} }, 60);
+}
+function closeNameInput(start) {
+  nameInputOpen = false;
+  nameInput.style.display = 'none';
+  try { nameInput.blur(); } catch {}
+  if (start) {
+    playerName = (nameInput.value.trim() || '无名选手').slice(0, 12);
+    lsSet('ghfd_name', playerName);
+    reset(); state = 'playing';
+  }
+}
+nameInput.addEventListener('keydown', (e) => {
+  e.stopPropagation(); // 输入昵称时的按键不触发游戏快捷键
+  if (e.key === 'Enter') { e.preventDefault(); closeNameInput(true); }
+  if (e.key === 'Escape') { e.preventDefault(); closeNameInput(false); }
+});
+nameInput.addEventListener('blur', () => { if (nameInputOpen) closeNameInput(true); });
 
 function resize() {
   const scale = Math.min(innerWidth / LOGIC_W, innerHeight / LOGIC_H);
@@ -131,8 +155,10 @@ resize();
 // —— 输入 ——
 const input = { left: false, right: false };
 addEventListener('keydown', (e) => {
+  if (nameInputOpen) return; // 昵称输入中：忽略游戏快捷键
   initAudio();
   if (e.key === 'm' || e.key === 'M') toggleMute();
+  if (e.key === 'Escape' && lbViewOpen) { lbViewOpen = false; return; }
   if (e.key === 'w' || e.key === 'W' || e.key === 'ArrowUp') tryDash();
   if (e.key === 'ArrowLeft') input.left = true;
   if (e.key === 'ArrowRight') input.right = true;
@@ -148,10 +174,15 @@ function touchPos(e) {
   return { p: (t.clientX - rect.left) / rect.width, q: (t.clientY - rect.top) / rect.height };
 }
 canvas.addEventListener('touchstart', (e) => {
+  if (nameInputOpen) return; // 昵称输入中
   e.preventDefault();
   initAudio();
   const pos = touchPos(e);
   if (pos.p > 0.86 && pos.q < 0.1) { toggleMute(); return; } // 右上角静音钮
+  if (state === 'menu') {
+    if (lbViewOpen) { if (pos.q > 0.92) { lbViewOpen = false; } return; } // 榜单页：底部返回
+    if (pos.q > 0.855 && pos.q < 0.94) { lbViewOpen = true; lbLoad(); return; } // 排行榜按钮
+  }
   const nowTap = performance.now();
   if (nowTap - lastTap < 300) { lastTap = 0; tryDash(); } // 双触 = 冲刺
   else lastTap = nowTap;
@@ -163,11 +194,16 @@ canvas.addEventListener('touchend', (e) => {
   input.left = input.right = false;
 }, { passive: false });
 canvas.addEventListener('mousedown', (e) => {
+  if (nameInputOpen) return; // 昵称输入中
   initAudio();
   const rect = canvas.getBoundingClientRect();
   const p = (e.clientX - rect.left) / rect.width;
   const q = (e.clientY - rect.top) / rect.height;
   if (p > 0.86 && q < 0.1) { toggleMute(); return; } // 右上角静音钮
+  if (state === 'menu') {
+    if (lbViewOpen) { if (q > 0.92) { lbViewOpen = false; } return; } // 榜单页：底部返回
+    if (q > 0.855 && q < 0.94) { lbViewOpen = true; lbLoad(); return; } // 排行榜按钮
+  }
   const nowTap = performance.now();
   if (nowTap - lastTap < 300) { lastTap = 0; tryDash(); } // 双击 = 冲刺
   else lastTap = nowTap;
@@ -273,7 +309,7 @@ function toggleMute() {
 
 // —— 排行榜：数据存在本仓库的 Issues 里（匿名可读；提交需要精细令牌，仅授本仓库 Issues 读写） ——
 const REPO_ISSUES = 'https://api.github.com/repos/Nomuber/guanghua-fengdong/issues';
-const LB_TOKEN = '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'; // 精细令牌（仅 Issues 读写本仓库）
+const LB_TOKEN = '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'; // 精细令牌（仅 Issues 读写本仓库）
 let lbData = null, lbRank = 0;
 async function lbLoad() {
   try {
@@ -294,12 +330,8 @@ async function lbLoad() {
 async function lbSubmit() {
   if (maxMeters <= 0) return;
   try {
-    let name = lsGet('ghfd_name', '');
-    if (!name) {
-      name = prompt('这局成绩将进入排行榜，留个名字：', '无名选手') || '无名选手';
-      lsSet('ghfd_name', name);
-    }
-    const entry = { n: name.slice(0, 12), a: maxMeters, t: titleOf(maxMeters), d: new Date().toISOString().slice(0, 10) };
+    let name = (playerName || '无名选手').slice(0, 12);
+    const entry = { n: (playerName || '无名选手').slice(0, 12), a: maxMeters, t: titleOf(maxMeters), d: new Date().toISOString().slice(0, 10) };
     const list = (await lbLoad()) || [];
     list.push(entry);
     list.sort((x, y) => y.a - x.a);
@@ -336,7 +368,9 @@ let deathReason = '';
 let shakeT = 0, shakeAmp = 0; // 受击屏幕震动
 let zoomCur = 1, zoomPunchT = 0; // 相机缩放（速度感）与入柱前冲
 let colCount = 0, superT = 0, hurtT = 0, invulT = 0; // 累计过柱数 / 超级加速剩余 / 受伤窗口 / 无敌帧
-let dashT = 0, dashCd = 0, lastTap = 0; // 主动冲刺：剩余 / 冷却 / 双击计时 / 无敌帧
+let dashT = 0, dashCd = 0, lastTap = 0; // 主动冲刺：剩余 / 冷却 / 双击计时
+let lbViewOpen = false; // 全体排行榜视图开关
+let playerName = lsGet('ghfd_name', '无名选手'); // 本局昵称（每局开始时输入） / 无敌帧
 bestMeters = +(lsGet('ghfd_best', 0));
 
 function reset() {
@@ -416,7 +450,7 @@ function genColumnsUpTo(topY) {
 }
 
 function advanceState() {
-  if (state === 'menu') { reset(); state = 'playing'; }
+  if (state === 'menu') { openNameInput(); } // 弹出画布内昵称输入框，确认后开局
   else if (state === 'over') { state = 'menu'; }
 }
 
@@ -1404,7 +1438,7 @@ function drawSwirl(x, y, dir, t) {
 
 // —— 渲染 ——
 function draw() {
-  if (state === 'menu') { drawMenu(); return; }
+  if (state === 'menu') { if (lbViewOpen) { drawLbView(); return; } drawMenu(); return; }
 
   const t = nowT();
   // 速度透视：极快（冲刺/超高航速）时先把整个场景画到离屏画布，
@@ -1722,13 +1756,49 @@ function drawMenu() {
     ctx.lineTo(LOGIC_W / 2 - 96, 580);
     ctx.closePath(); ctx.fill();
   }
-  if (lbData && lbData.length) { // 排行榜前三（数据存在仓库 Issues）
-    ctx.fillStyle = '#8a7a5c'; ctx.font = '13px sans-serif';
-    ctx.fillText('🏆 排行榜', LOGIC_W / 2, 624);
-    lbData.slice(0, 3).forEach((e, i) => {
-      ctx.fillText((i + 1) + '. ' + e.n + '　' + fmtAlt(e.a), LOGIC_W / 2, 648 + i * 21);
+  // 排行榜按钮（点击查看全体榜单）
+  ctx.fillStyle = '#8a3033'; ctx.font = 'bold 16px sans-serif';
+  ctx.fillText('🏆 排行榜 · 点击查看', LOGIC_W / 2, 651);
+  ctx.strokeStyle = 'rgba(138,48,51,0.8)'; ctx.lineWidth = 1.6;
+  dRect(LOGIC_W / 2 - 96, 630, 192, 34, 91, 1.6);
+}
+
+// 全体排行榜视图（菜单按钮进入）
+function drawLbView() {
+  ctx.fillStyle = '#f7f1e3';
+  ctx.fillRect(0, 0, LOGIC_W, LOGIC_H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#2d3748'; ctx.font = 'bold 26px "Segoe Print","Comic Sans MS",sans-serif';
+  ctx.fillText('🏆 全体排行榜', LOGIC_W / 2, 54);
+  ctx.font = '12px sans-serif'; ctx.fillStyle = '#8a7a5c';
+  ctx.fillText('找到你在哪了吗？', LOGIC_W / 2, 78);
+  const rows = (lbData || []).slice(0, 21);
+  if (!rows.length) {
+    ctx.fillStyle = '#5b4636'; ctx.font = '16px sans-serif';
+    ctx.fillText('还没有成绩，回去飞一趟抢占榜首！', LOGIC_W / 2, 220);
+  } else {
+    rows.forEach((e, i) => {
+      const y = 112 + i * 27;
+      const rankTxt = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : String(i + 1);
+      ctx.font = i < 3 ? 'bold 15px sans-serif' : '14px sans-serif';
+      ctx.textAlign = 'left'; ctx.fillStyle = i < 3 ? '#8a3033' : '#5b4636';
+      ctx.fillText(rankTxt, 40, y);
+      ctx.fillText(e.n, 86, y);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = i < 3 ? '#8a3033' : '#2d3748';
+      ctx.fillText(fmtAlt(e.a), LOGIC_W - 40, y);
     });
+    if ((lbData || []).length > 21) {
+      ctx.textAlign = 'center'; ctx.font = '12px sans-serif'; ctx.fillStyle = '#a89880';
+      ctx.fillText('仅显示前 21 名', LOGIC_W / 2, LOGIC_H - 64);
+    }
   }
+  // 返回按钮
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e67e22'; ctx.font = 'bold 18px sans-serif';
+  ctx.fillText('↩ 返回', LOGIC_W / 2, LOGIC_H - 26);
+  ctx.strokeStyle = '#e67e22'; ctx.lineWidth = 1.6;
+  dLine(LOGIC_W / 2 - 44, LOGIC_H - 14, LOGIC_W / 2 + 44, LOGIC_H - 12, 91, 1.6);
 }
 
 function drawOver() {
