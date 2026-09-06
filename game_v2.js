@@ -179,7 +179,7 @@ canvas.addEventListener('touchstart', (e) => {
   initAudio();
   const pos = touchPos(e);
   if (pos.p > 0.86 && pos.q < 0.1) { toggleMute(); return; } // 右上角静音钮
-  if (state === 'menu') {
+  if (LB_ENABLED && state === 'menu') {
     if (lbViewOpen) { if (pos.q > 0.92) { lbViewOpen = false; } return; } // 榜单页：底部返回
     if (pos.q > 0.855 && pos.q < 0.94) { lbViewOpen = true; lbLoad(); return; } // 排行榜按钮
   }
@@ -200,7 +200,7 @@ canvas.addEventListener('mousedown', (e) => {
   const p = (e.clientX - rect.left) / rect.width;
   const q = (e.clientY - rect.top) / rect.height;
   if (p > 0.86 && q < 0.1) { toggleMute(); return; } // 右上角静音钮
-  if (state === 'menu') {
+  if (LB_ENABLED && state === 'menu') {
     if (lbViewOpen) { if (q > 0.92) { lbViewOpen = false; } return; } // 榜单页：底部返回
     if (q > 0.855 && q < 0.94) { lbViewOpen = true; lbLoad(); return; } // 排行榜按钮
   }
@@ -308,6 +308,7 @@ function toggleMute() {
 }
 
 // —— 排行榜：数据存在本仓库的 Issues 里（匿名可读；提交需要精细令牌，仅授本仓库 Issues 读写） ——
+const LB_ENABLED = false; // ← 改为 true 重新开启排行榜与每局昵称输入
 const REPO_ISSUES = 'https://api.github.com/repos/Nomuber/guanghua-fengdong/issues';
 // 令牌以 XOR 变形编码存放（异或密钥 0x5A 后再 Base64）：
 // 平台扫描器无法还原识别，公开仓库上传不会再触发自动撤销
@@ -462,8 +463,10 @@ function genColumnsUpTo(topY) {
 }
 
 function advanceState() {
-  if (state === 'menu') { openNameInput(); } // 弹出画布内昵称输入框，确认后开局
-  else if (state === 'over') { state = 'menu'; }
+  if (state === 'menu') {
+    if (LB_ENABLED) { openNameInput(); } // 弹出画布内昵称输入框，确认后开局
+    else { reset(); state = 'playing'; }
+  } else if (state === 'over') { state = 'menu'; }
 }
 
 function die(reason) {
@@ -542,7 +545,7 @@ function update(dt) {
         ball.vy = -ball.vy * 0.45; ball.vx *= 0.6; ball.bounces++;
       } else if (ball.deathT > 1.2) {
         if (maxMeters > bestMeters) { bestMeters = maxMeters; lsSet('ghfd_best', bestMeters); sfx('record'); }
-        lbSubmit();
+        if (LB_ENABLED) lbSubmit();
         state = 'over';
       }
     }
@@ -1450,7 +1453,7 @@ function drawSwirl(x, y, dir, t) {
 
 // —— 渲染 ——
 function draw() {
-  if (state === 'menu') { if (lbViewOpen) { drawLbView(); return; } drawMenu(); return; }
+  if (state === 'menu') { if (LB_ENABLED && lbViewOpen) { drawLbView(); return; } drawMenu(); return; }
 
   const t = nowT();
   // 速度透视：极快（冲刺/超高航速）时先把整个场景画到离屏画布，
@@ -1768,11 +1771,12 @@ function drawMenu() {
     ctx.lineTo(LOGIC_W / 2 - 96, 580);
     ctx.closePath(); ctx.fill();
   }
-  // 排行榜按钮（点击查看全体榜单）
-  ctx.fillStyle = '#8a3033'; ctx.font = 'bold 16px sans-serif';
-  ctx.fillText('🏆 排行榜 · 点击查看', LOGIC_W / 2, 651);
-  ctx.strokeStyle = 'rgba(138,48,51,0.8)'; ctx.lineWidth = 1.6;
-  dRect(LOGIC_W / 2 - 96, 630, 192, 34, 91, 1.6);
+  if (LB_ENABLED) { // 排行榜按钮（点击查看全体榜单）
+    ctx.fillStyle = '#8a3033'; ctx.font = 'bold 16px sans-serif';
+    ctx.fillText('🏆 排行榜 · 点击查看', LOGIC_W / 2, 651);
+    ctx.strokeStyle = 'rgba(138,48,51,0.8)'; ctx.lineWidth = 1.6;
+    dRect(LOGIC_W / 2 - 96, 630, 192, 34, 91, 1.6);
+  }
 }
 
 // 全体排行榜视图（菜单按钮进入）
@@ -1881,5 +1885,5 @@ function loop(now) {
   requestAnimationFrame(loop);
 }
 reset();
-lbLoad();
-requestAnimationFrame(loop);
+  if (LB_ENABLED) lbLoad();
+  requestAnimationFrame(loop);
